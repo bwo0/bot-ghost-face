@@ -1,22 +1,9 @@
 import {
   Client,
   GatewayIntentBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ChannelType,
+  EmbedBuilder
 } from 'discord.js';
-import {
-  joinVoiceChannel,
-  getVoiceConnection,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  StreamType,
-} from '@discordjs/voice';
-import play from 'play-dl';
+
 import fs from 'fs';
 import path from 'path';
 
@@ -24,253 +11,246 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates,
-  ],
+    GatewayIntentBits.GuildMembers
+  ]
 });
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const OWNER_ID = process.env.OWNER_ID;
 
-if (!TOKEN) throw new Error('DISCORD_TOKEN environment variable is required');
+if (!TOKEN) throw new Error('DISCORD_TOKEN obrigatório');
 
-// ─── Persistence ────────────────────────────────────────────────────────────
-
-const DB_PATH     = path.resolve('ghostcoins.json');
-const GAMES_PATH  = path.resolve('games.json');
-const CONFIG_PATH = path.resolve('config.json');
+const DB_PATH = path.resolve('ghostcoins.json');
 
 interface UserData {
   coins: number;
   daily: number;
   weekly: number;
   monthly: number;
-  lastRob?: number;
-  lastHeist?: number;
-  lastWork?: number;
-  lastCrime?: number;
-  betWins?: number;
-  betLosses?: number;
-  betProfit?: number;
+  betWins: number;
+  betLosses: number;
+  betProfit: number;
   banned?: boolean;
 }
 
-interface Game {
-  id: string;
-  sport: string;
-  team1: string;
-  team2: string;
-  createdAt: number;
-  status: 'upcoming' | 'finished';
-  score?: string;
-}
-
-interface ScoreBet {
-  userId: string;
-  gameId: string;
-  score: string;
-  amount: number;
-}
-
-interface Config { announcementChannelId?: string; botAdmins?: string[]; }
-
 let db: Record<string, UserData> = {};
-let games: Game[] = [];
-let scoreBets: ScoreBet[] = [];
-let config: Config = {};
 
-if (fs.existsSync(DB_PATH))     db                        = JSON.parse(fs.readFileSync(DB_PATH,     'utf-8'));
-if (fs.existsSync(GAMES_PATH)) ({ games, scoreBets }      = JSON.parse(fs.readFileSync(GAMES_PATH,  'utf-8')));
-if (fs.existsSync(CONFIG_PATH)) config                    = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-if (!games)     games     = [];
-if (!scoreBets) scoreBets = [];
+if (fs.existsSync(DB_PATH)) {
+  db = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+}
 
-function saveDB()     { fs.writeFileSync(DB_PATH,     JSON.stringify(db,                   null, 2)); }
-function saveGames()  { fs.writeFileSync(GAMES_PATH,  JSON.stringify({ games, scoreBets }, null, 2)); }
-function saveConfig() { fs.writeFileSync(CONFIG_PATH, JSON.stringify(config,               null, 2)); }
+function saveDB() {
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
 
 function createUser(id: string) {
-  if (!db[id]) db[id] = { coins: 500, daily: 0, weekly: 0, monthly: 0, betWins: 0, betLosses: 0, betProfit: 0 };
-  if (db[id].betWins   == null) db[id].betWins   = 0;
-  if (db[id].betLosses == null) db[id].betLosses = 0;
-  if (db[id].betProfit == null) db[id].betProfit = 0;
+  if (!db[id]) {
+    db[id] = {
+      coins: 500,
+      daily: 0,
+      weekly: 0,
+      monthly: 0,
+      betWins: 0,
+      betLosses: 0,
+      betProfit: 0
+    };
+  }
 }
 
-function checkCooldown(last: number, duration: number) { return Date.now() - last >= duration; }
+function checkCooldown(last: number, duration: number) {
+  return Date.now() - last >= duration;
+}
 
 function getRank() {
   return Object.entries(db)
     .sort((a, b) => b[1].coins - a[1].coins)
-    .map(([id, data], i) => `${i + 1}. <@${id}> — ${data.coins.toLocaleString()} GC`);
+    .map(([id, data], i) =>
+      `${i + 1}. <@${id}> — ${data.coins.toLocaleString()} GC`
+    );
 }
 
-function getBetRank() {
-  return Object.entries(db)
-    .filter(([, d]) => (d.betWins ?? 0) + (d.betLosses ?? 0) > 0)
-    .sort((a, b) => (b[1].betProfit ?? 0) - (a[1].betProfit ?? 0))
-    .map(([id, d], i) => {
-      const profit = d.betProfit ?? 0;
-      const sign   = profit >= 0 ? '+' : '';
-      return `${i + 1}. <@${id}> — ${sign}${profit.toLocaleString()} GC (${d.betWins}W/${d.betLosses}L)`;
-    });
-}
-
-function genId() { return Math.random().toString(36).slice(2, 6).toUpperCase(); }
-
-function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
-
-// ─── Sports data ─────────────────────────────────────────────────────────────
-
-const SPORTS: Record<string, { label: string; emoji: string; matchups: [string, string][] }> = {
-  pingpong: { label: 'Ping Pong', emoji: '🏓', matchups: [['Rafael','Lucas'],['João','Pedro'],['Carlos','André'],['Vitor','Bruno']] },
-  futebol:  { label: 'Futebol',   emoji: '⚽',  matchups: [['Flamengo','Corinthians'],['Santos','Palmeiras'],['Grêmio','Internacional'],['Vasco','Botafogo']] },
-  sinuca:   { label: 'Sinuca',    emoji: '🎱',  matchups: [['Marcos','Felipe'],['Diego','Rodrigo'],['Thiago','Eduardo'],['Leandro','Sandro']] },
-  golf:     { label: 'Golf',      emoji: '⛳',  matchups: [['Tiger','Rory'],['Scottie','Jon'],['Viktor','Xander'],['Justin','Jordan']] },
-  basquete: { label: 'Basquete',  emoji: '🏀',  matchups: [['Lakers','Warriors'],['Celtics','Heat'],['Bucks','Nets'],['Suns','Nuggets']] },
-};
-
-interface BetState { amount: number; sport: string; option1: string; option2: string; }
-const pendingBets = new Map<string, BetState>();
-
-// userId -> timestamp de quando o mute expira
 const mutedUsers = new Map<string, number>();
-
-// Rastrear mensagens recentes para !violar
-const recentMessages: { userId: string; ts: number }[] = [];
-
-// ─── Music queue ─────────────────────────────────────────────────────────────
-interface Track { title: string; url: string; requester: string; }
-interface MusicQueue {
-  tracks: Track[];
-  player: ReturnType<typeof createAudioPlayer> | null;
-  textChannelId?: string;
-}
-
-const musicQueues = new Map<string, MusicQueue>();
-
-function getQueue(guildId: string): MusicQueue {
-  if (!musicQueues.has(guildId)) musicQueues.set(guildId, { tracks: [], player: null });
-  return musicQueues.get(guildId)!;
-}
-
-async function playNext(guildId: string) {
-  const queue = getQueue(guildId);
-  const conn  = getVoiceConnection(guildId);
-  if (!conn || queue.tracks.length === 0) return;
-
-  const track = queue.tracks[0];
-
-  async function sendToChannel(msg: string) {
-    if (!queue.textChannelId) return;
-    try {
-      const ch = await client.channels.fetch(queue.textChannelId);
-      if (ch?.isTextBased()) await (ch as any).send(msg);
-    } catch {}
-  }
-
-  let stream;
-  try {
-    const validated = await play.validate(track.url);
-    if (!validated || validated === 'search') {
-      const results = await play.search(track.title, { limit: 1, source: { youtube: 'video' } });
-      if (results.length > 0) track.url = results[0].url;
-    }
-    stream = await play.stream(track.url, { quality: 2 });
-  } catch (err) {
-    console.error(`[Music] Erro ao carregar "${track.title}":`, err);
-    await sendToChannel(`❌ Erro ao tocar **${track.title}** — pulando`);
-    queue.tracks.shift();
-    return playNext(guildId);
-  }
-
-  if (!queue.player) queue.player = createAudioPlayer();
-  const resource = createAudioResource(stream.stream, { inputType: stream.type as StreamType });
-  conn.subscribe(queue.player);
-  queue.player.play(resource);
-
-  await sendToChannel(`▶️ Tocando agora: **${track.title}** (pedido por ${track.requester})`);
-
-  queue.player.removeAllListeners(AudioPlayerStatus.Idle);
-  queue.player.once(AudioPlayerStatus.Idle, () => {
-    queue.tracks.shift();
-    playNext(guildId);
-  });
-}
 
 function parseDuration(str: string): number | null {
   const match = str.match(/^(\d+)(s|m|h)$/i);
   if (!match) return null;
+
   const n = parseInt(match[1]);
-  switch (match[2].toLowerCase()) {
+
+  switch (match[2]) {
     case 's': return n * 1000;
-    case 'm': return n * 60 * 1000;
-    case 'h': return n * 60 * 60 * 1000;
-    default:  return null;
+    case 'm': return n * 60000;
+    case 'h': return n * 3600000;
+    default: return null;
   }
 }
 
-// ─── Auto game scheduler ─────────────────────────────────────────────────────
+client.once('clientReady', () => {
+  console.log(`✅ ${client.user?.tag} online`);
+  client.user?.setPresence({
+    status: 'dnd',
+    activities: [{ name: '👻 Ghost Face Economy' }]
+  });
+});
 
-const AUTO_RESOLVE_AFTER = 20 * 60 * 1000;
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
 
-function randomScore(sportKey: string): string {
-  const r = () => Math.floor(Math.random() * 6);
-  switch (sportKey) {
-    case 'futebol':  { const [a, b] = [r(), r()]; return `${a}x${b}`; }
-    case 'basquete': { const a = 70 + Math.floor(Math.random() * 51); const b = 70 + Math.floor(Math.random() * 51); return `${a}x${b}`; }
-    case 'pingpong': { const a = Math.floor(Math.random() * 4); const b = Math.floor(Math.random() * 4); return `${a}x${b}`; }
-    case 'sinuca':   { const a = Math.floor(Math.random() * 6); const b = Math.floor(Math.random() * 6); return `${a}x${b}`; }
-    case 'golf':     { const a = Math.floor(Math.random() * 10); const b = Math.floor(Math.random() * 10); return `${a}x${b}`; }
-    default:         return `${r()}x${r()}`;
-  }
-}
+  const id = message.author.id;
+  createUser(id);
 
-async function resolveGame(game: Game, sportKey: string) {
-  if (game.status !== 'upcoming') return;
+  const muteExpiry = mutedUsers.get(id);
+  if (muteExpiry && Date.now() < muteExpiry) return;
 
-  game.status = 'finished';
-  game.score  = randomScore(sportKey);
+  const args = message.content.split(' ');
+  const now = Date.now();
 
-  const betsForGame = scoreBets.filter(b => b.gameId === game.id);
-  const results: { userId: string; won: boolean; payout: number }[] = [];
-
-  for (const bet of betsForGame) {
-    createUser(bet.userId);
-    const exact = bet.score.toLowerCase() === game.score;
-    const [g1, g2] = game.score.split('x').map(Number);
-    const [b1, b2] = bet.score.toLowerCase().split('x').map(Number);
-    const rightWinner = (g1 > g2 && b1 > b2) || (g1 < g2 && b1 < b2) || (g1 === g2 && b1 === b2);
-
-    let payout = 0;
-    if (exact)            payout = bet.amount * 3;
-    else if (rightWinner) payout = Math.floor(bet.amount * 1.5);
-
-    if (payout > 0) {
-      db[bet.userId].coins    += payout;
-      db[bet.userId].betWins   = (db[bet.userId].betWins  ?? 0) + 1;
-      db[bet.userId].betProfit = (db[bet.userId].betProfit ?? 0) + (payout - bet.amount);
-    } else {
-      db[bet.userId].coins    -= bet.amount;
-      db[bet.userId].betLosses = (db[bet.userId].betLosses ?? 0) + 1;
-      db[bet.userId].betProfit = (db[bet.userId].betProfit ?? 0) - bet.amount;
+  if (!message.content.startsWith('!')) {
+    if (/https?:\/\/\S+/i.test(message.content)) {
+      await message.delete().catch(() => null);
+      return message.channel.send(`<@${id}> vou enfiar esse link no teu bolso 😹`);
     }
-    results.push({ userId: bet.userId, won: payout > 0, payout: payout || -bet.amount });
   }
 
-  scoreBets = scoreBets.filter(b => b.gameId !== game.id);
-  saveDB(); saveGames();
+  if (message.content === '!saldo') {
+    return message.reply(`🪙 Ghost Coins: **${db[id].coins.toLocaleString()} GC**`);
+  }
 
-  if (!config.announcementChannelId) return;
-  try {
-    const channel = await client.channels.fetch(config.announcementChannelId);
-    if (!channel?.isTextBased()) return;
+  if (message.content === '!daily') {
+    if (!checkCooldown(db[id].daily, 86400000)) {
+      return message.reply('⏳ Daily já usado');
+    }
 
-    const winners = results.filter(r => r.won).map(r => `<@${r.userId}> **+${r.payout.toLocaleString()} GC**`).join('\n');
-    const losers  = results.filter(r => !r.won).map(r => `<@${r.userId}> **${r.payout.toLocaleString()} GC**`).join('\n');
+    db[id].coins += 250;
+    db[id].daily = now;
+    saveDB();
 
+    return message.reply('🎁 +250 Ghost Coins');
+  }
+
+  if (message.content === '!weekly') {
+    if (!checkCooldown(db[id].weekly, 604800000)) {
+      return message.reply('⏳ Weekly já usado');
+    }
+
+    db[id].coins += 1500;
+    db[id].weekly = now;
+    saveDB();
+
+    return message.reply('📦 +1500 Ghost Coins');
+  }
+
+  if (message.content === '!monthly') {
+    if (!checkCooldown(db[id].monthly, 2592000000)) {
+      return message.reply('⏳ Monthly já usado');
+    }
+
+    db[id].coins += 5000;
+    db[id].monthly = now;
+    saveDB();
+
+    return message.reply('💎 +5000 Ghost Coins');
+  }
+
+  if (message.content.startsWith('!pay')) {
+    const user = message.mentions.users.first();
+    const amount = parseInt(args[2]);
+
+    if (!user || !amount) {
+      return message.reply('❌ Uso: !pay @user quantidade');
+    }
+
+    createUser(user.id);
+
+    if (amount > db[id].coins) {
+      return message.reply('❌ Saldo insuficiente');
+    }
+
+    db[id].coins -= amount;
+    db[user.id].coins += amount;
+
+    saveDB();
+
+    return message.reply(`✅ Transferido ${amount} GC para <@${user.id}>`);
+  }
+
+  if (message.content === '!rank') {
     const embed = new EmbedBuilder()
-      .setTitle(`🏆 Resultado: ${game.sport} — ${game.team1} vs ${game.team2}`)
+      .setTitle('💰 Ranking Ghost Coins')
+      .setDescription(getRank().slice(0, 10).join('\n'))
+      .setColor('Purple');
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  if (message.content.startsWith('!addcoins')) {
+    if (message.author.id !== OWNER_ID) {
+      return message.reply('❌ Só dono');
+    }
+
+    const user = message.mentions.users.first() ?? message.author;
+    const amount = parseInt(args[2] || args[1]);
+
+    if (!amount) return message.reply('❌ Valor inválido');
+
+    createUser(user.id);
+    db[user.id].coins += amount;
+
+    saveDB();
+
+    return message.reply(`✅ ${amount} GC adicionados`);
+  }
+
+  if (message.content.startsWith('!mutebot')) {
+    if (message.author.id !== OWNER_ID) {
+      return message.reply('❌ Só dono');
+    }
+
+    const user = message.mentions.users.first();
+    const timeArg = args[2];
+
+    if (!user || !timeArg) {
+      return message.reply('❌ Uso: !mutebot @user 10m');
+    }
+
+    const ms = parseDuration(timeArg);
+
+    if (!ms) {
+      return message.reply('❌ Tempo inválido');
+    }
+
+    mutedUsers.set(user.id, Date.now() + ms);
+
+    return message.reply(`🔇 <@${user.id}> mutado por ${timeArg}`);
+  }
+
+  if (message.content === '!apostar') {
+    const amount = parseInt(args[1]);
+
+    if (!amount || amount > db[id].coins) {
+      return message.reply('❌ valor inválido');
+    }
+
+    const ganhou = Math.random() < 0.5;
+
+    if (ganhou) {
+      db[id].coins += amount;
+      db[id].betWins += 1;
+      db[id].betProfit += amount;
+      saveDB();
+      return message.reply(`🎉 ganhou ${amount} GC`);
+    } else {
+      db[id].coins -= amount;
+      db[id].betLosses += 1;
+      db[id].betProfit -= amount;
+      saveDB();
+      return message.reply(`💀 perdeu ${amount} GC`);
+    }
+  }
+});
+
+client.login(TOKEN);me.sport} — ${game.team1} vs ${game.team2}`)
       .addFields(
         { name: '⚽ Placar Final', value: game.score!.toUpperCase(), inline: true },
         { name: '🎰 Apostas', value: `${betsForGame.length} aposta(s)`, inline: true },
