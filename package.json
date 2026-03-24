@@ -1,7 +1,15 @@
 {
-  "name": "bot",
+  "name": "ghost-bot",
   "version": "1.0.0",
+  "main": "index.ts",
   "scripts": {
     "start": "npx ts-node index.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "@discordjs/voice": "^0.16.1",
+    "play-dl": "^1.9.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
   }
 }
