@@ -1,0 +1,7 @@
+{
+  "name": "bot",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "npx ts-node index.ts"
+  }
+}
